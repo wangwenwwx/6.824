@@ -191,9 +191,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.votedFor = -1
 		}
 	}
-	if args.LastLogTerm > rf.logs[len(rf.logs)-1].Term || args.LastLogTerm == rf.logs[len(rf.logs)-1].Term && args.LastLogIndex >= len(rf.logs) {
+	if args.LastLogTerm > rf.logs[len(rf.logs)-1].Term || (args.LastLogTerm == rf.logs[len(rf.logs)-1].Term && args.LastLogIndex >= len(rf.logs)-1) {
 		if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 			reply.VoteGranted = true
+			rf.votedFor = args.CandidateId
 		} else {
 			reply.VoteGranted = false
 		}
@@ -203,7 +204,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.term
 	rf.mu.Unlock()
 
-	//log.Printf("args:%d,replay:%d\n",args,reply)
+	log.Printf("args:%d,replay:%v\n", args, reply)
 	// Your code here (2A, 2B).
 }
 
@@ -325,7 +326,7 @@ func (rf *Raft) heartBeats() {
 				if rf.nextIndex[i] <= len(rf.logs) {
 					args.Entries = rf.logs[rf.nextIndex[i]:]
 				} else {
-					args.Entries = nil
+					args.Entries = make([]Entry, 0)
 				}
 				go rf.sendAppendEntries(i, &args)
 			}
@@ -336,7 +337,7 @@ func (rf *Raft) heartBeats() {
 }
 func (rf *Raft) sendAppendEntries(index int, args *AppendEntriesArgs) {
 	reply := AppendEntriesReply{}
-	rf.peers[index].Call("Raft.AppendEntries", &args, &reply)
+	rf.peers[index].Call("Raft.AppendEntries", args, &reply)
 	if len(args.Entries) != 0 {
 		rf.mu.Lock()
 		if reply.Success {
@@ -472,6 +473,8 @@ func (rf *Raft) election() {
 					Term:        term,
 					CandidateId: rf.me,
 				}
+				args.LastLogIndex = len(rf.logs) - 1
+				args.LastLogTerm = rf.logs[args.LastLogIndex].Term
 				replay := RequestVoteReply{}
 				go rf.sendRequestVote(i, &args, &replay, &count)
 			}
