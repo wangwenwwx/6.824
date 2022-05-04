@@ -191,7 +191,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.votedFor = -1
 		}
 	}
-	if args.LastLogTerm > rf.logs[len(rf.logs)-1].term || args.LastLogTerm == rf.logs[len(rf.logs)-1].term && args.LastLogIndex >= len(rf.logs) {
+	if args.LastLogTerm > rf.logs[len(rf.logs)-1].Term || args.LastLogTerm == rf.logs[len(rf.logs)-1].Term && args.LastLogIndex >= len(rf.logs) {
 		if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 			reply.VoteGranted = true
 		} else {
@@ -253,8 +253,8 @@ type AppendEntriesArgs struct {
 	LeaderCommit int
 }
 type Entry struct {
-	command interface{}
-	term    int
+	Command interface{}
+	Term    int
 }
 
 type AppendEntriesReply struct {
@@ -275,12 +275,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		rf.term = args.Term
 		rf.status = Follower
-		if len(rf.logs) < args.PrevLogIndex+1 || rf.logs[args.PrevLogIndex].term != args.PrevLogTerm {
+		if len(rf.logs) < args.PrevLogIndex+1 || rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 			reply.Success = false
 		} else {
 			reply.Success = true
 			for i, j := args.PrevLogIndex+1, 0; i < len(rf.logs) && j < len(args.Entries); i, j = i+1, j+1 {
-				if args.Entries[j].term != rf.logs[i].term {
+				if args.Entries[j].Term != rf.logs[i].Term {
 					rf.logs = rf.logs[:i]
 					break
 				}
@@ -321,7 +321,7 @@ func (rf *Raft) heartBeats() {
 					PrevLogIndex: rf.nextIndex[i] - 1,
 					LeaderCommit: rf.commitIndex,
 				}
-				args.PrevLogTerm = rf.logs[args.PrevLogIndex].term
+				args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
 				if rf.nextIndex[i] <= len(rf.logs) {
 					args.Entries = rf.logs[rf.nextIndex[i]:]
 				} else {
@@ -358,7 +358,7 @@ func (rf *Raft) sendAppendEntries(index int, args *AppendEntriesArgs) {
 				}
 			}
 			n := arr.Pop().(int)
-			if n > rf.commitIndex && rf.logs[n].term == rf.term {
+			if n > rf.commitIndex && rf.logs[n].Term == rf.term {
 				rf.commitIndex = n
 			}
 		} else {
@@ -396,8 +396,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, false
 	}
 	entry := Entry{
-		command: command,
-		term:    rf.term,
+		Command: command,
+		Term:    rf.term,
 	}
 	rf.logs = append(rf.logs, entry)
 
