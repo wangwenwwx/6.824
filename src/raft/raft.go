@@ -18,9 +18,10 @@ package raft
 //
 
 import (
-	"container/heap"
 	"log"
 	"math/rand"
+	"sort"
+
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -267,7 +268,7 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	if args.Term < rf.term {
-		log.Printf("AppendEntries %v,%d", args, rf.term)
+		//log.Printf("AppendEntries %v,%d", args, rf.term)
 		reply.Success = false
 		reply.Term = rf.term
 	} else {
@@ -365,22 +366,15 @@ func (rf *Raft) sendAppendEntries(index int, args *AppendEntriesArgs) {
 			if args.PrevLogIndex+len(args.Entries) > rf.matchIndex[index] {
 				rf.matchIndex[index] = args.PrevLogIndex + len(args.Entries)
 				rf.nextIndex[index] = args.PrevLogIndex + len(args.Entries) + 1
-				var arr IntHeap = make([]int, len(rf.matchIndex)/2)
-				heap.Init(&arr)
+				var arr = make([]int, len(rf.matchIndex))
 				for i := 0; i < len(rf.matchIndex); i++ {
-					if i < len(arr) {
-						arr.Push(rf.matchIndex[i])
-					} else {
-						min := arr.Pop().(int)
-						if rf.matchIndex[i] > min {
-							arr.Push(rf.matchIndex[i])
-						} else {
-							arr.Push(min)
-						}
-					}
+					arr[i] = rf.matchIndex[i]
 				}
-				n := arr.Pop().(int)
-				log.Printf("%d,%d,%d,%d", n, rf.commitIndex, rf.matchIndex[index], index)
+				sort.Slice(arr, func(i, j int) bool {
+					return arr[i] > arr[j]
+				})
+				n := arr[len(arr)/2-1]
+				//log.Printf("%v,%d,%d,%d", arr, rf.commitIndex, rf.matchIndex[index], index)
 				if n > rf.commitIndex && rf.logs[n].Term == rf.term {
 					lastCommit := rf.commitIndex
 					rf.commitIndex = n
@@ -440,7 +434,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Term:    rf.term,
 	}
 	rf.logs = append(rf.logs, entry)
-
 	// Your code here (2B).
 
 	return len(rf.logs) - 1, rf.term, true
