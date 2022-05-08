@@ -76,6 +76,7 @@ type Raft struct {
 	matchIndex  []int
 	nextIndex   []int
 	applyChan   chan ApplyMsg
+	random      *rand.Rand
 	// Your data here (2A, heartbeats, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -116,6 +117,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.term)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.logs)
+	e.Encode(rf.commitIndex)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -134,14 +136,17 @@ func (rf *Raft) readPersist(data []byte) {
 	var term int
 	var votedFor int
 	var logs []Entry
+	var commitIndex int
 	if d.Decode(&term) != nil ||
 		d.Decode(&votedFor) != nil ||
-		d.Decode(&logs) != nil {
+		d.Decode(&logs) != nil ||
+		d.Decode(&commitIndex) != nil {
 		log.Fatalln("error")
 	} else {
 		rf.term = term
 		rf.votedFor = votedFor
 		rf.logs = logs
+		rf.commitIndex = commitIndex
 	}
 }
 
@@ -205,6 +210,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateId
+			rf.persist()
 		} else {
 			reply.VoteGranted = false
 		}
@@ -268,8 +274,10 @@ type Entry struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term        int
+	Success     bool
+	FailedIndex int
+	FailedTerm  int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -279,17 +287,33 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		reply.Term = rf.term
 	} else {
-		if rf.status != Follower {
+		if rf.status != Follower || args.Term > rf.term {
 			rf.term = args.Term
 			rf.votedFor = -1
-			rf.status = Follower
-			go rf.ticker()
 			rf.persist()
+			if rf.status != Follower {
+				rf.status = Follower
+				go rf.ticker()
+			}
 		}
+		reply.Term = rf.term
 		//log.Printf("AppendEntries %v,%d",args, len(rf.logs))
 		if len(rf.logs) < args.PrevLogIndex+1 || rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 			//log.Printf("AppendEntries %v,%d",args, len(rf.logs))
 			reply.Success = false
+			if len(rf.logs) < args.PrevLogIndex+1 {
+				reply.FailedTerm = rf.logs[len(rf.logs)-1].Term
+				reply.FailedIndex = len(rf.logs) - 1
+				if reply.FailedIndex == 0 {
+					reply.FailedIndex = 1
+				}
+			} else {
+				reply.FailedTerm = rf.logs[args.PrevLogIndex].Term
+				reply.FailedIndex = args.PrevLogIndex
+				for rf.logs[reply.FailedIndex-1].Term == reply.FailedTerm {
+					reply.FailedIndex--
+				}
+			}
 		} else {
 			reply.Success = true
 			for i, j := args.PrevLogIndex+1, 0; i < len(rf.logs) && j < len(args.Entries); i, j = i+1, j+1 {
@@ -362,7 +386,7 @@ func (rf *Raft) heartBeats() {
 			}
 		}
 		rf.mu.RUnlock()
-		time.Sleep(time.Millisecond * 35)
+		time.Sleep(time.Millisecond * 50)
 	}
 }
 func (rf *Raft) sendAppendEntries(index int, args *AppendEntriesArgs) {
@@ -410,7 +434,7 @@ func (rf *Raft) sendAppendEntries(index int, args *AppendEntriesArgs) {
 			} else {
 				//log.Printf("index:%d,%v,reply:%v,%d",index,args,reply,rf.nextIndex[index])
 				if args.Term >= reply.Term && rf.nextIndex[index] > args.PrevLogIndex {
-					rf.nextIndex[index]--
+					rf.nextIndex[index] = reply.FailedIndex
 				}
 			}
 		}
@@ -487,9 +511,11 @@ func (rf *Raft) ticker() {
 			continue
 		case <-time.After(time.Duration(rf.timeout) * time.Millisecond):
 			rf.mu.Lock()
-			rf.status = Candidate
+			if rf.status == Follower {
+				rf.status = Candidate
+				go rf.election()
+			}
 			rf.mu.Unlock()
-			rf.election()
 			return
 		}
 	}
@@ -505,6 +531,7 @@ func (rf *Raft) election() {
 		term := rf.term
 		rf.votedFor = rf.me
 		rf.persist()
+		rf.timeout = rf.random.Int63n(500) + 1000
 		rf.mu.Unlock()
 		//log.Printf("Candidate:%d,term:%d", rf.me, rf.term)
 		startTime := time.Now().Add(time.Duration(rf.timeout) * time.Millisecond)
@@ -528,14 +555,16 @@ func (rf *Raft) election() {
 		//log.Printf("id: %d,vote: %d", rf.me, count)
 		if atomic.LoadInt32(&count) > int32(len(rf.peers)/2) {
 			rf.mu.Lock()
-			rf.status = Leader
-			index := len(rf.logs)
-			for i := 0; i < len(rf.nextIndex); i++ {
-				rf.nextIndex[i] = index
+			if rf.status == Candidate {
+				rf.status = Leader
+				index := len(rf.logs)
+				for i := 0; i < len(rf.nextIndex); i++ {
+					rf.nextIndex[i] = index
+				}
+				//log.Printf("leader:%d,term:%d,count:%d", rf.me, rf.term, count)
+				go rf.heartBeats()
 			}
 			rf.mu.Unlock()
-			go rf.heartBeats()
-			//log.Printf("leader:%d,term:%d", rf.me, rf.term)
 			return
 		}
 	}
@@ -563,8 +592,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.term = 0
 	rf.heartbeats = make(chan bool)
-	r := rand.New(rand.NewSource(int64(me)))
-	rf.timeout = r.Int63n(500) + 1000
+	rf.random = rand.New(rand.NewSource(int64(me)))
+	rf.timeout = rf.random.Int63n(500) + 1000
 	rf.logs = make([]Entry, 1)
 	rf.commitIndex = 0
 	rf.lastApplied = 0
@@ -574,17 +603,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	go func() {
-		applyCh <- ApplyMsg{
-			CommandValid:  true,
-			Command:       -1,
-			CommandIndex:  0,
-			SnapshotValid: false,
-			Snapshot:      nil,
-			SnapshotTerm:  0,
-			SnapshotIndex: 0,
-		}
-	}()
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
