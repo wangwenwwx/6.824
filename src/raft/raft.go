@@ -500,6 +500,7 @@ func (rf *Raft) ticker() {
 
 	for rf.killed() == false {
 		rf.mu.RLock()
+		timeout := rf.timeout
 		if rf.status != Follower {
 			rf.mu.RUnlock()
 			return
@@ -509,7 +510,7 @@ func (rf *Raft) ticker() {
 		select {
 		case <-rf.heartbeats:
 			continue
-		case <-time.After(time.Duration(rf.timeout) * time.Millisecond):
+		case <-time.After(time.Duration(timeout) * time.Millisecond):
 			rf.mu.Lock()
 			if rf.status == Follower {
 				rf.status = Candidate
