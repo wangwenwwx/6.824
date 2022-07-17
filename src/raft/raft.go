@@ -377,7 +377,9 @@ func (rf *Raft) heartBeats() {
 				}
 				args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
 				if rf.nextIndex[i] < len(rf.logs) {
-					args.Entries = rf.logs[rf.nextIndex[i]:]
+					len := len(rf.logs) - rf.nextIndex[i]
+					args.Entries = make([]Entry, len, len)
+					copy(args.Entries, rf.logs[rf.nextIndex[i]:])
 				} else {
 					args.Entries = make([]Entry, 0)
 				}
