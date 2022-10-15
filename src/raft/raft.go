@@ -388,7 +388,7 @@ func (rf *Raft) heartBeats() {
 			}
 		}
 		rf.mu.RUnlock()
-		time.Sleep(time.Millisecond * 50)
+		time.Sleep(time.Millisecond * 100)
 	}
 }
 func (rf *Raft) sendAppendEntries(index int, args *AppendEntriesArgs) {
@@ -540,6 +540,7 @@ func (rf *Raft) election() {
 		startTime := time.Now().Add(time.Duration(rf.timeout) * time.Millisecond)
 		var count int32
 		count = 1
+		rf.mu.RLock()
 		for i := 0; i < len(rf.peers); i++ {
 			if i != rf.me {
 				args := RequestVoteArgs{
@@ -552,6 +553,7 @@ func (rf *Raft) election() {
 				go rf.sendRequestVote(i, &args, &replay, &count)
 			}
 		}
+		rf.mu.RUnlock()
 		for atomic.LoadInt32(&count) <= int32(len(rf.peers)/2) && startTime.After(time.Now()) {
 
 		}
