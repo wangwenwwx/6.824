@@ -178,9 +178,10 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	snapLen := index - rf.snapshotIndex
-	rf.logs = rf.logs[snapLen:]
+	rf.snapshotTerm = rf.getTerm(index)
 	rf.snapshotIndex = index
 	rf.snapshot = snapshot
+	rf.logs = rf.logs[snapLen:]
 	rf.persist()
 }
 func (rf *Raft) getIndex(index int) int {
@@ -344,14 +345,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.Success = false
 			if len(rf.logs)+rf.snapshotIndex < args.PrevLogIndex {
 				reply.FailedTerm = rf.getTerm(len(rf.logs) + rf.snapshotIndex)
-				reply.FailedIndex = len(rf.logs) + rf.snapshotIndex
+				reply.FailedIndex = len(rf.logs) + rf.snapshotIndex + 1
 				if reply.FailedIndex == 0 {
 					reply.FailedIndex = 1
 				}
 			} else {
 				reply.FailedTerm = rf.getTerm(args.PrevLogIndex)
 				reply.FailedIndex = args.PrevLogIndex
-				for rf.getIndex(reply.FailedIndex-1) >= 0 && rf.getTerm(reply.FailedIndex-1) == reply.FailedTerm {
+				for reply.FailedIndex > rf.snapshotIndex+1 && rf.getTerm(reply.FailedIndex-1) == reply.FailedTerm {
 					reply.FailedIndex--
 				}
 			}
@@ -371,7 +372,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 			//log.Printf("%d,%d,%v",args.LeaderCommit,rf.commitIndex,reply)
 			if args.LeaderCommit > rf.commitIndex {
-				lastCommit := rf.commitIndex
+				var lastCommit int
+				if rf.commitIndex > rf.snapshotIndex {
+					lastCommit = rf.commitIndex
+				} else {
+					lastCommit = rf.snapshotIndex
+				}
 				if args.LeaderCommit < len(rf.logs)+rf.snapshotIndex {
 					rf.commitIndex = args.LeaderCommit
 				} else {
@@ -466,7 +472,7 @@ func (rf *Raft) sendAppendEntries(index int, args *AppendEntriesArgs) {
 				if n > rf.commitIndex && rf.getTerm(n) == rf.term {
 					lastCommit := rf.commitIndex
 					rf.commitIndex = n
-					log.Printf("id:%d,lastCommit:%d,commit:%d", rf.me, lastCommit, n)
+					//log.Printf("id:%d,lastCommit:%d,commit:%d", rf.me, lastCommit, n)
 					for i := lastCommit + 1; i <= rf.commitIndex; i++ {
 						apply := ApplyMsg{
 							CommandValid:  true,
@@ -533,8 +539,8 @@ func (rf Raft) sendSnapshot(index int, args *SnapshotArgs) {
 	}
 }
 func (rf *Raft) ApplySnapshot(args *SnapshotArgs, reply *SnapshotReplay) {
-	//log.Printf("%v", args)
 	rf.mu.Lock()
+	//log.Printf("args:%v,index:%d,rf.term:%d", args,rf.me,rf.term)
 	reply.Term = rf.term
 	if args.Term < rf.term {
 		//log.Printf("AppendEntries %v,%d", args, rf.term)
@@ -550,7 +556,7 @@ func (rf *Raft) ApplySnapshot(args *SnapshotArgs, reply *SnapshotReplay) {
 			}
 		}
 		reply.Term = rf.term
-		if len(rf.logs)+rf.snapshotIndex < args.SnapshotIndex {
+		if len(rf.logs)+rf.snapshotIndex < args.SnapshotIndex || rf.getTerm(args.SnapshotIndex) != args.SnapshotTerm {
 			rf.snapshot = args.Snapshot
 			rf.snapshotTerm = args.SnapshotTerm
 			rf.snapshotIndex = args.SnapshotIndex
