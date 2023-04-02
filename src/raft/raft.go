@@ -101,7 +101,6 @@ func (rf *Raft) GetState() (int, bool) {
 
 	var term int
 	var isleader bool
-	//log.Printf("term:%d,leader:%t\n",term,isleader)
 	rf.mu.RLock()
 	term = rf.term
 	isleader = rf.status == Leader
@@ -516,7 +515,7 @@ type SnapshotReplay struct {
 	Term int
 }
 
-func (rf Raft) sendSnapshot(index int, args *SnapshotArgs) {
+func (rf *Raft) sendSnapshot(index int, args *SnapshotArgs) {
 	//log.Printf("%v", args)
 	reply := SnapshotReplay{}
 	ok := rf.peers[index].Call("Raft.ApplySnapshot", args, &reply)
@@ -551,27 +550,31 @@ func (rf *Raft) ApplySnapshot(args *SnapshotArgs, reply *SnapshotReplay) {
 			rf.persist()
 			if rf.status != Follower {
 				rf.status = Follower
-				rf.leadId = -1
 				go rf.ticker()
 			}
 		}
 		reply.Term = rf.term
-		if len(rf.logs)+rf.snapshotIndex < args.SnapshotIndex || rf.getTerm(args.SnapshotIndex) != args.SnapshotTerm {
-			rf.snapshot = args.Snapshot
-			rf.snapshotTerm = args.SnapshotTerm
-			rf.snapshotIndex = args.SnapshotIndex
-			rf.logs = rf.logs[0:0]
-			rf.term = args.SnapshotTerm
-		} else {
-			rf.logs = rf.logs[rf.getIndex(args.SnapshotIndex)+1:]
-			rf.snapshotTerm = args.SnapshotTerm
-			rf.snapshotIndex = args.SnapshotIndex
-			rf.snapshot = args.Snapshot
-		}
-		if rf.commitIndex < args.SnapshotIndex {
-			rf.commitIndex = args.SnapshotIndex
-		}
-		rf.persist()
+		rf.snapshot = args.Snapshot
+		rf.snapshotTerm = args.SnapshotTerm
+		rf.snapshotIndex = args.SnapshotIndex
+		rf.logs = rf.logs[0:0]
+		//if len(rf.logs)+rf.snapshotIndex < args.SnapshotIndex || rf.getTerm(args.SnapshotIndex) != args.SnapshotTerm {
+		//	rf.snapshot = args.Snapshot
+		//	rf.snapshotTerm = args.SnapshotTerm
+		//	rf.snapshotIndex = args.SnapshotIndex
+		//	rf.logs = rf.logs[0:0]
+		//} else {
+		//	rf.logs = rf.logs[rf.getIndex(args.SnapshotIndex)+1:]
+		//	rf.snapshotTerm = args.SnapshotTerm
+		//	rf.snapshotIndex = args.SnapshotIndex
+		//	rf.snapshot = args.Snapshot
+		//}
+		rf.commitIndex = args.SnapshotIndex
+		//if rf.commitIndex < args.SnapshotIndex {
+		//	rf.commitIndex = args.SnapshotIndex
+		//}
+		//rf.persist()
+		rf.Snapshot(args.SnapshotIndex, args.Snapshot)
 		apply := ApplyMsg{
 			CommandValid:  false,
 			Command:       nil,
@@ -686,21 +689,23 @@ func (rf *Raft) election() {
 		var count int32
 		count = 1
 		rf.mu.RLock()
+		lastLogIndex := len(rf.logs) + rf.snapshotIndex
+		lastLogTerm := rf.getTerm(len(rf.logs) + rf.snapshotIndex)
+		rf.mu.RUnlock()
 		for i := 0; i < len(rf.peers); i++ {
 			if i != rf.me {
 				args := RequestVoteArgs{
 					Term:        term,
 					CandidateId: rf.me,
 				}
-				args.LastLogIndex = len(rf.logs) + rf.snapshotIndex
-				args.LastLogTerm = rf.getTerm(len(rf.logs) + rf.snapshotIndex)
+				args.LastLogIndex = lastLogIndex
+				args.LastLogTerm = lastLogTerm
 				replay := RequestVoteReply{}
 				go rf.sendRequestVote(i, &args, &replay, &count)
 			}
 		}
-		rf.mu.RUnlock()
 		for atomic.LoadInt32(&count) <= int32(len(rf.peers)/2) && startTime.After(time.Now()) {
-
+			time.Sleep(time.Duration(50) * time.Millisecond)
 		}
 		//log.Printf("id: %d,vote: %d", rf.me, count)
 		if atomic.LoadInt32(&count) > int32(len(rf.peers)/2) {
