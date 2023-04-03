@@ -124,7 +124,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.snapshotIndex)
 	e.Encode(rf.snapshotTerm)
 	data := w.Bytes()
-	rf.persister.SaveStateAndSnapshot(data, rf.snapshot)
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -176,12 +176,22 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	snapLen := index - rf.snapshotIndex
 	rf.snapshotTerm = rf.getTerm(index)
 	rf.snapshotIndex = index
 	rf.snapshot = snapshot
 	rf.logs = rf.logs[snapLen:]
-	rf.persist()
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.term)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	e.Encode(rf.snapshotIndex)
+	e.Encode(rf.snapshotTerm)
+	data := w.Bytes()
+	rf.persister.SaveStateAndSnapshot(data, rf.snapshot)
 }
 func (rf *Raft) getIndex(index int) int {
 	return index - rf.snapshotIndex - 1
@@ -321,6 +331,7 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	applyMsgs := make([]ApplyMsg, 10)
 	rf.mu.Lock()
 	if args.Term < rf.term {
 		//log.Printf("AppendEntries %v,%d", args, rf.term)
@@ -392,7 +403,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 						SnapshotTerm:  0,
 						SnapshotIndex: 0,
 					}
-					rf.applyChan <- apply
+					applyMsgs = append(applyMsgs, apply)
 				}
 			}
 		}
@@ -404,6 +415,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 	rf.mu.Unlock()
+	for _, msg := range applyMsgs {
+		rf.applyChan <- msg
+	}
 }
 func (rf *Raft) heartBeats() {
 	for rf.killed() == false {
@@ -454,6 +468,7 @@ func (rf *Raft) sendAppendEntries(index int, args *AppendEntriesArgs) {
 	reply := AppendEntriesReply{}
 	ok := rf.peers[index].Call("Raft.AppendEntries", args, &reply)
 	if ok {
+		msgs := make([]ApplyMsg, 10)
 		rf.mu.Lock()
 		if reply.Success {
 			if args.PrevLogIndex+len(args.Entries) > rf.matchIndex[index] {
@@ -482,7 +497,7 @@ func (rf *Raft) sendAppendEntries(index int, args *AppendEntriesArgs) {
 							SnapshotTerm:  0,
 							SnapshotIndex: 0,
 						}
-						rf.applyChan <- apply
+						msgs = append(msgs, apply)
 					}
 				}
 			}
@@ -502,6 +517,9 @@ func (rf *Raft) sendAppendEntries(index int, args *AppendEntriesArgs) {
 			}
 		}
 		rf.mu.Unlock()
+		for _, msg := range msgs {
+			rf.applyChan <- msg
+		}
 	}
 }
 
@@ -541,7 +559,7 @@ func (rf *Raft) ApplySnapshot(args *SnapshotArgs, reply *SnapshotReplay) {
 	rf.mu.Lock()
 	//log.Printf("args:%v,index:%d,rf.term:%d", args,rf.me,rf.term)
 	reply.Term = rf.term
-	if args.Term < rf.term {
+	if args.SnapshotIndex <= rf.commitIndex {
 		//log.Printf("AppendEntries %v,%d", args, rf.term)
 	} else {
 		if rf.status != Follower || args.Term > rf.term {
@@ -574,7 +592,7 @@ func (rf *Raft) ApplySnapshot(args *SnapshotArgs, reply *SnapshotReplay) {
 		//	rf.commitIndex = args.SnapshotIndex
 		//}
 		//rf.persist()
-		rf.Snapshot(args.SnapshotIndex, args.Snapshot)
+		rf.persist()
 		apply := ApplyMsg{
 			CommandValid:  false,
 			Command:       nil,
