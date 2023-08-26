@@ -447,7 +447,7 @@ func (rf *Raft) heartBeats() {
 			}
 		}
 		rf.mu.RUnlock()
-		time.Sleep(time.Millisecond * 100)
+		time.Sleep(time.Millisecond * 30)
 	}
 }
 
@@ -733,6 +733,7 @@ func (rf *Raft) election() {
 				}
 				//log.Printf("leader:%d,term:%d,count:%d", rf.me, rf.term, count)
 				go rf.heartBeats()
+				go rf.Start(-1)
 			}
 			rf.mu.Unlock()
 			return
