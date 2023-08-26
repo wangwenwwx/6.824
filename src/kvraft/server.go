@@ -29,7 +29,6 @@ type Op struct {
 	Key      string
 	Value    string
 }
-
 type KVServer struct {
 	mu      sync.Mutex
 	me      int
@@ -40,10 +39,11 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	lastAppliedIndex int
-	lastAppliedOp    Op
-	state            map[string]string
-	appliedSeq       map[int64]int32
+	lastAppliedIndex  int
+	lastAppliedOp     Op
+	runningCommandMap map[int]bool
+	state             map[string]string
+	appliedSeq        map[int64]int32
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -69,12 +69,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.mu.Unlock()
 		return
 	}
+	kv.runningCommandMap[index] = true
 	for kv.lastAppliedIndex != index {
 		kv.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
 		kv.mu.Lock()
 		DPrintf("term:%d,client:%d,me:%d,raftIndex:%d,lastIndex:%d", term, args.ClientId, kv.me, index, kv.lastAppliedIndex)
 	}
+	delete(kv.runningCommandMap, index)
 	if op.ClientId != kv.lastAppliedOp.ClientId || op.Seq != kv.lastAppliedOp.Seq {
 		reply.Err = ErrServerError
 	} else {
@@ -108,12 +110,14 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.mu.Unlock()
 		return
 	}
-	for i := 0; kv.lastAppliedIndex != index; i++ {
+	kv.runningCommandMap[index] = true
+	for kv.lastAppliedIndex != index {
 		kv.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
 		kv.mu.Lock()
 		DPrintf("term:%d,client:%d,me:%d,raftIndex:%d,lastIndex:%d", term, args.ClientId, kv.me, index, kv.lastAppliedIndex)
 	}
+	delete(kv.runningCommandMap, index)
 	if op.ClientId != kv.lastAppliedOp.ClientId || op.Seq != kv.lastAppliedOp.Seq {
 		reply.Err = ErrServerError
 	} else {
@@ -171,6 +175,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.appliedSeq = map[int64]int32{}
 	kv.state = map[string]string{}
 	kv.lastAppliedIndex = 0
+	kv.runningCommandMap = make(map[int]bool)
 	go kv.applier()
 	return kv
 }
@@ -208,14 +213,17 @@ func (kv *KVServer) applier() {
 					}
 				} else {
 					op = Op{}
+					//delete(kv.runningCommandMap, kv.lastAppliedIndex)
 				}
 				kv.lastAppliedOp = op
 				delete(commandMap, kv.lastAppliedIndex)
 				DPrintf("me:%d,commitIndex:%d,key:%s,value:%s", kv.me, m.CommandIndex, op.Key, kv.state[op.Key])
-				command, ok = commandMap[kv.lastAppliedIndex+1].(Op)
-				kv.mu.Unlock()
-				time.Sleep(30 * time.Millisecond)
-				kv.mu.Lock()
+				command, ok = commandMap[kv.lastAppliedIndex+1]
+				for kv.runningCommandMap[kv.lastAppliedIndex] {
+					kv.mu.Unlock()
+					time.Sleep(10 * time.Millisecond)
+					kv.mu.Lock()
+				}
 			}
 			kv.mu.Unlock()
 		}
