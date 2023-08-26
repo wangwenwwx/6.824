@@ -1,13 +1,19 @@
 package kvraft
 
-import "6.5840/labrpc"
+import (
+	"6.5840/labrpc"
+	"sync/atomic"
+)
 import "crypto/rand"
 import "math/big"
-
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	id          int64
+	seq         int32
+	serverCount int
+	leader      int
 }
 
 func nrand() int64 {
@@ -21,6 +27,11 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.id = nrand()
+	ck.serverCount = len(servers)
+	n, _ := rand.Int(rand.Reader, big.NewInt(int64(ck.serverCount)))
+	ck.leader = int(n.Int64())
+	ck.seq = 0
 	return ck
 }
 
@@ -37,7 +48,17 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	return ""
+	seq := atomic.AddInt32(&ck.seq, 1)
+	args := GetArgs{key, ck.id, seq}
+	reply := GetReply{}
+	ck.servers[ck.leader].Call("KVServer.Get", &args, &reply)
+	for reply.Err != OK {
+		//DPrintf("reply:%v", reply)
+		ck.changeLeader()
+		ck.servers[ck.leader].Call("KVServer.Get", &args, &reply)
+	}
+	DPrintf("ck,k:%s,v:%s,seq:%d", key, reply.Value, seq)
+	return reply.Value
 }
 
 // shared by Put and Append.
@@ -50,6 +71,16 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	seq := atomic.AddInt32(&ck.seq, 1)
+	args := PutAppendArgs{key, value, op, ck.id, seq}
+	reply := PutAppendReply{}
+	ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply)
+	for reply.Err != OK {
+		//DPrintf("reply:%v", reply)
+		ck.changeLeader()
+		ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply)
+	}
+	DPrintf("leader:%d,k:%s,v:%s,op:%s,seq:%d", ck.leader, key, value, op, seq)
 }
 
 func (ck *Clerk) Put(key string, value string) {
@@ -57,4 +88,9 @@ func (ck *Clerk) Put(key string, value string) {
 }
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
+}
+func (ck *Clerk) changeLeader() {
+	leader := (ck.leader + 1) % ck.serverCount
+	//DPrintf("clientId:%d,leader:%d", ck.id, leader)
+	ck.leader = leader
 }
