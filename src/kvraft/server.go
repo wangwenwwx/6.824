@@ -4,6 +4,7 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -44,6 +45,9 @@ type KVServer struct {
 	runningCommandMap map[int]bool
 	state             map[string]string
 	appliedSeq        map[int64]int32
+
+	persister *raft.Persister
+	close     chan bool
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -70,7 +74,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 	kv.runningCommandMap[index] = true
-	for kv.lastAppliedIndex != index {
+	for !kv.killed() && kv.lastAppliedIndex < index {
 		kv.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
 		kv.mu.Lock()
@@ -111,7 +115,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	kv.runningCommandMap[index] = true
-	for kv.lastAppliedIndex != index {
+	for !kv.killed() && kv.lastAppliedIndex < index {
 		kv.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
 		kv.mu.Lock()
@@ -138,6 +142,7 @@ func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	// Your code here, if desired.
+	close(kv.close)
 }
 
 func (kv *KVServer) killed() bool {
@@ -169,64 +174,119 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.close = make(chan bool)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.appliedSeq = map[int64]int32{}
-	kv.state = map[string]string{}
-	kv.lastAppliedIndex = 0
 	kv.runningCommandMap = make(map[int]bool)
+	kv.persister = persister
+	if persister.SnapshotSize() > 0 {
+		kv.applySnapshot(persister.ReadSnapshot(), -1)
+	} else {
+		kv.appliedSeq = map[int64]int32{}
+		kv.state = map[string]string{}
+		kv.lastAppliedIndex = 0
+	}
 	go kv.applier()
 	return kv
 }
 func (kv *KVServer) applier() {
-	commandMap := map[int]interface{}{}
-	for m := range kv.applyCh {
-		DPrintf("kvMe:%d,command:%+v", kv.me, m)
-		if m.CommandValid {
-			kv.mu.Lock()
-			if kv.lastAppliedIndex+1 > m.CommandIndex {
-				kv.mu.Unlock()
-				continue
-			} else if kv.lastAppliedIndex+1 < m.CommandIndex {
-
-				//DPrintf("index:%d,lastSeq:%d,seq:%d,lastAppliedIndex:%d,commitIndex:%d", kv.me, kv.appliedSeq[op.ClientId], op.Seq, kv.lastAppliedIndex, m.CommandIndex)
+	commandMap := make(map[int]interface{})
+	for {
+		select {
+		case <-kv.close:
+			return
+		case m := <-kv.applyCh:
+			DPrintf("kvMe:%d,command:%+v", kv.me, m)
+			if m.CommandValid {
+				kv.applyCommand(&m, commandMap)
+			} else if m.SnapshotValid {
+				kv.applySnapshot(m.Snapshot, m.SnapshotIndex)
+				commandMap = make(map[int]interface{})
 			}
-			commandMap[m.CommandIndex] = m.Command
-			var ok bool
-			var op Op
-			command, ok := commandMap[kv.lastAppliedIndex+1]
-			for ok {
-				kv.lastAppliedIndex++
-				if command != -1 {
-					op = command.(Op)
-					if kv.appliedSeq[op.ClientId]+1 == op.Seq {
-						kv.appliedSeq[op.ClientId]++
-						if op.Op != "Get" {
-							value, contains := kv.state[op.Key]
-							if op.Op == "Put" || !contains {
-								kv.state[op.Key] = op.Value
-							} else {
-								kv.state[op.Key] = value + op.Value
-							}
-						}
-					}
-				} else {
-					op = Op{}
-					//delete(kv.runningCommandMap, kv.lastAppliedIndex)
-				}
-				kv.lastAppliedOp = op
-				delete(commandMap, kv.lastAppliedIndex)
-				DPrintf("me:%d,commitIndex:%d,key:%s,value:%s", kv.me, m.CommandIndex, op.Key, kv.state[op.Key])
-				command, ok = commandMap[kv.lastAppliedIndex+1]
-				for kv.runningCommandMap[kv.lastAppliedIndex] {
-					kv.mu.Unlock()
-					time.Sleep(10 * time.Millisecond)
-					kv.mu.Lock()
-				}
-			}
-			kv.mu.Unlock()
+			//DPrintf("me:%d,apply end index:%d", kv.me, m.CommandIndex)
 		}
-		//DPrintf("me:%d,apply end index:%d", kv.me, m.CommandIndex)
 	}
+}
+
+func (kv *KVServer) applyCommand(m *raft.ApplyMsg, commandMap map[int]interface{}) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if kv.lastAppliedIndex+1 > m.CommandIndex {
+		return
+	} else if kv.lastAppliedIndex+1 < m.CommandIndex {
+
+		//DPrintf("index:%d,lastSeq:%d,seq:%d,lastAppliedIndex:%d,commitIndex:%d", kv.me, kv.appliedSeq[op.ClientId], op.Seq, kv.lastAppliedIndex, m.CommandIndex)
+	}
+	commandMap[m.CommandIndex] = m.Command
+	var ok bool
+	var op Op
+	command, ok := commandMap[kv.lastAppliedIndex+1]
+	for ok {
+		kv.lastAppliedIndex++
+		if command != -1 {
+			op = command.(Op)
+			if kv.appliedSeq[op.ClientId]+1 == op.Seq {
+				kv.appliedSeq[op.ClientId]++
+				if op.Op != "Get" {
+					value, contains := kv.state[op.Key]
+					if op.Op == "Put" || !contains {
+						kv.state[op.Key] = op.Value
+					} else {
+						kv.state[op.Key] = value + op.Value
+					}
+				}
+			}
+		} else {
+			op = Op{}
+			//delete(kv.runningCommandMap, kv.lastAppliedIndex)
+		}
+		kv.lastAppliedOp = op
+		delete(commandMap, kv.lastAppliedIndex)
+		DPrintf("me:%d,commitIndex:%d,key:%s,value:%s", kv.me, kv.lastAppliedIndex, op.Key, kv.state[op.Key])
+		if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
+			kv.snapshot()
+		}
+		command, ok = commandMap[kv.lastAppliedIndex+1]
+		for kv.runningCommandMap[kv.lastAppliedIndex] {
+			kv.mu.Unlock()
+			time.Sleep(10 * time.Millisecond)
+			kv.mu.Lock()
+		}
+	}
+}
+func (kv *KVServer) snapshot() {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.lastAppliedIndex)
+	e.Encode(kv.lastAppliedOp)
+	e.Encode(kv.state)
+	e.Encode(kv.appliedSeq)
+	kv.rf.Snapshot(kv.lastAppliedIndex, w.Bytes())
+	DPrintf("me:%d,snapshot index:%d", kv.me, kv.lastAppliedIndex)
+}
+func (kv *KVServer) applySnapshot(snapshot []byte, index int) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	var lastIncludedIndex int
+	var lastOp Op
+	var state map[string]string
+	var appliedSeq map[int64]int32
+	if d.Decode(&lastIncludedIndex) != nil ||
+		d.Decode(&lastOp) != nil ||
+		d.Decode(&state) != nil ||
+		d.Decode(&appliedSeq) != nil {
+		log.Fatalf("snapshot decode error")
+	}
+	if index != -1 && index != lastIncludedIndex {
+		DPrintf("server %v snapshot doesn't match m.SnapshotIndex", index)
+	}
+	kv.lastAppliedIndex = lastIncludedIndex
+	kv.lastAppliedOp = lastOp
+	kv.state = state
+	kv.appliedSeq = appliedSeq
+	kv.runningCommandMap = make(map[int]bool)
+	DPrintf("me:%d,apply snapshot index:%d", kv.me, kv.lastAppliedIndex)
 }
