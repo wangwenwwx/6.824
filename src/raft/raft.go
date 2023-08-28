@@ -82,6 +82,7 @@ type Raft struct {
 	snapshotIndex int
 	snapshot      []byte
 	snapshotTerm  int
+	close         chan bool
 }
 type Status int
 
@@ -336,7 +337,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		reply.Term = rf.term
 		//log.Printf("AppendEntries %v,%d",args, len(rf.logs))
-		if len(rf.logs)+rf.snapshotIndex-1 < args.PrevLogIndex || rf.getTerm(args.PrevLogIndex) != args.PrevLogTerm {
+		if len(rf.logs)+rf.snapshotIndex-1 < args.PrevLogIndex || rf.getIndex(args.PrevLogIndex) >= 0 && rf.getTerm(args.PrevLogIndex) != args.PrevLogTerm {
 			//log.Printf("AppendEntries %v,%d",args, len(rf.logs))
 			reply.Success = false
 			if len(rf.logs)+rf.snapshotIndex-1 < args.PrevLogIndex {
@@ -355,7 +356,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			reply.Success = true
 			for i, j := args.PrevLogIndex+1, 0; i < len(rf.logs)+rf.snapshotIndex && j < len(args.Entries); i, j = i+1, j+1 {
-				if args.Entries[j].Term != rf.logs[rf.getIndex(i)].Term {
+				if rf.getIndex(i) >= 0 && args.Entries[j].Term != rf.getTerm(i) {
 					rf.logs = rf.logs[:rf.getIndex(i)]
 					break
 				}
@@ -402,7 +403,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.mu.Unlock()
 	for _, msg := range applyMsgs {
-		rf.applyChan <- msg
+		rf.commitMsg(msg)
 	}
 }
 func (rf *Raft) heartBeats() {
@@ -473,7 +474,7 @@ func (rf *Raft) sendAppendEntries(index int, args *AppendEntriesArgs) {
 				if n > rf.commitIndex && rf.getTerm(n) == rf.term {
 					lastCommit := rf.commitIndex
 					rf.commitIndex = n
-					//log.Printf("id:%d,lastCommit:%d,commit:%d", rf.me, lastCommit, n)
+					DPrintf("id:%d,lastCommit:%d,commit:%d", rf.me, lastCommit, n)
 					for i := lastCommit + 1; i <= rf.commitIndex; i++ {
 						apply := ApplyMsg{
 							CommandValid:  true,
@@ -505,7 +506,7 @@ func (rf *Raft) sendAppendEntries(index int, args *AppendEntriesArgs) {
 		}
 		rf.mu.Unlock()
 		for _, msg := range msgs {
-			rf.applyChan <- msg
+			rf.commitMsg(msg)
 		}
 	}
 }
@@ -544,6 +545,7 @@ func (rf *Raft) sendSnapshot(index int, args *SnapshotArgs) {
 }
 func (rf *Raft) ApplySnapshot(args *SnapshotArgs, reply *SnapshotReplay) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	//log.Printf("args:%v,index:%d,rf.term:%d", args,rf.me,rf.term)
 	reply.Term = rf.term
 	if args.SnapshotIndex <= rf.commitIndex {
@@ -593,9 +595,8 @@ func (rf *Raft) ApplySnapshot(args *SnapshotArgs, reply *SnapshotReplay) {
 			SnapshotTerm:  args.SnapshotTerm,
 			SnapshotIndex: args.SnapshotIndex,
 		}
-		rf.applyChan <- apply
+		rf.commitMsg(apply)
 	}
-	rf.mu.Unlock()
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -642,6 +643,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	close(rf.close)
 }
 
 func (rf *Raft) killed() bool {
@@ -740,6 +742,13 @@ func (rf *Raft) election() {
 		}
 	}
 }
+func (rf *Raft) commitMsg(m ApplyMsg) {
+	select {
+	case <-rf.close:
+		return
+	case rf.applyChan <- m:
+	}
+}
 
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -772,6 +781,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, len(peers))
 	rf.nextIndex = make([]int, len(peers))
 	rf.applyChan = applyCh
+	rf.close = make(chan bool)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
