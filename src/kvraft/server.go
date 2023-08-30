@@ -47,7 +47,6 @@ type KVServer struct {
 	appliedSeq        map[int64]int32
 
 	persister *raft.Persister
-	close     chan bool
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -67,7 +66,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	index, term, isLeader := kv.rf.Start(op)
 	//DPrintf("raftIndex:%d,args:%+v", index, op)
-	//defer DPrintf("get reply:%v", reply)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		kv.mu.Unlock()
@@ -76,7 +74,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.runningCommandMap[index] = true
 	for !kv.killed() && kv.lastAppliedIndex < index {
 		kv.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 		kv.mu.Lock()
 		DPrintf("term:%d,client:%d,me:%d,raftIndex:%d,lastIndex:%d", term, args.ClientId, kv.me, index, kv.lastAppliedIndex)
 	}
@@ -142,7 +140,6 @@ func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	// Your code here, if desired.
-	close(kv.close)
 }
 
 func (kv *KVServer) killed() bool {
@@ -174,7 +171,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.close = make(chan bool)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
@@ -191,68 +187,48 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	return kv
 }
 func (kv *KVServer) applier() {
-	commandMap := make(map[int]interface{})
-	for {
-		select {
-		case <-kv.close:
-			return
-		case m := <-kv.applyCh:
-			DPrintf("kvMe:%d,command:%+v", kv.me, m)
-			if m.CommandValid {
-				kv.applyCommand(&m, commandMap)
-			} else if m.SnapshotValid {
-				kv.applySnapshot(m.Snapshot, m.SnapshotIndex)
-				commandMap = make(map[int]interface{})
-			}
-			//DPrintf("me:%d,apply end index:%d", kv.me, m.CommandIndex)
+	for m := range kv.applyCh {
+		DPrintf("kvMe:%d,command:%+v", kv.me, m)
+		if m.CommandValid {
+			kv.applyCommand(&m)
+		} else if m.SnapshotValid {
+			kv.applySnapshot(m.Snapshot, m.SnapshotIndex)
 		}
+		//DPrintf("me:%d,apply end index:%d", kv.me, m.CommandIndex)
 	}
 }
 
-func (kv *KVServer) applyCommand(m *raft.ApplyMsg, commandMap map[int]interface{}) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
+func (kv *KVServer) applyCommand(m *raft.ApplyMsg) {
 	if kv.lastAppliedIndex+1 > m.CommandIndex {
 		return
 	} else if kv.lastAppliedIndex+1 < m.CommandIndex {
 
 		//DPrintf("index:%d,lastSeq:%d,seq:%d,lastAppliedIndex:%d,commitIndex:%d", kv.me, kv.appliedSeq[op.ClientId], op.Seq, kv.lastAppliedIndex, m.CommandIndex)
 	}
-	commandMap[m.CommandIndex] = m.Command
-	var ok bool
-	var op Op
-	command, ok := commandMap[kv.lastAppliedIndex+1]
-	for ok {
-		kv.lastAppliedIndex++
-		if command != -1 {
-			op = command.(Op)
-			if kv.appliedSeq[op.ClientId]+1 == op.Seq {
-				kv.appliedSeq[op.ClientId]++
-				if op.Op != "Get" {
-					value, contains := kv.state[op.Key]
-					if op.Op == "Put" || !contains {
-						kv.state[op.Key] = op.Value
-					} else {
-						kv.state[op.Key] = value + op.Value
-					}
-				}
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.lastAppliedIndex++
+	op := m.Command.(Op)
+	if kv.appliedSeq[op.ClientId]+1 == op.Seq {
+		kv.appliedSeq[op.ClientId]++
+		if op.Op != "Get" {
+			value, contains := kv.state[op.Key]
+			if op.Op == "Put" || !contains {
+				kv.state[op.Key] = op.Value
+			} else {
+				kv.state[op.Key] = value + op.Value
 			}
-		} else {
-			op = Op{}
-			//delete(kv.runningCommandMap, kv.lastAppliedIndex)
 		}
-		kv.lastAppliedOp = op
-		delete(commandMap, kv.lastAppliedIndex)
-		DPrintf("me:%d,commitIndex:%d,key:%s,value:%s", kv.me, kv.lastAppliedIndex, op.Key, kv.state[op.Key])
-		if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
-			kv.snapshot()
-		}
-		command, ok = commandMap[kv.lastAppliedIndex+1]
-		for kv.runningCommandMap[kv.lastAppliedIndex] {
-			kv.mu.Unlock()
-			time.Sleep(10 * time.Millisecond)
-			kv.mu.Lock()
-		}
+	}
+	kv.lastAppliedOp = op
+	DPrintf("me:%d,commitIndex:%d,key:%s,value:%s", kv.me, kv.lastAppliedIndex, op.Key, kv.state[op.Key])
+	if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
+		kv.snapshot()
+	}
+	for kv.runningCommandMap[kv.lastAppliedIndex] {
+		kv.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+		kv.mu.Lock()
 	}
 }
 func (kv *KVServer) snapshot() {

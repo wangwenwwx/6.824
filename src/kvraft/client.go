@@ -3,6 +3,7 @@ package kvraft
 import (
 	"6.5840/labrpc"
 	"sync/atomic"
+	"time"
 )
 import "crypto/rand"
 import "math/big"
@@ -50,16 +51,24 @@ func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
 	seq := atomic.AddInt32(&ck.seq, 1)
 	args := GetArgs{key, ck.id, seq}
-	reply := GetReply{}
-	ck.servers[ck.leader].Call("KVServer.Get", &args, &reply)
-	for reply.Err != OK {
+	for {
 		//DPrintf("reply:%v", reply)
+		reply := GetReply{}
+		done := make(chan bool)
+		leader := ck.leader
+		go ck.sendWithTimeout(func() {
+			ck.servers[leader].Call("KVServer.Get", &args, &reply)
+		}, done)
+		select {
+		case <-time.After(1 * time.Second):
+		case <-done:
+			if reply.Err == OK {
+				DPrintf("ck,k:%s,v:%s,seq:%d", key, reply.Value, seq)
+				return reply.Value
+			}
+		}
 		ck.changeLeader()
-		reply = GetReply{}
-		ck.servers[ck.leader].Call("KVServer.Get", &args, &reply)
 	}
-	DPrintf("ck,k:%s,v:%s,seq:%d", key, reply.Value, seq)
-	return reply.Value
 }
 
 // shared by Put and Append.
@@ -74,15 +83,24 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 	seq := atomic.AddInt32(&ck.seq, 1)
 	args := PutAppendArgs{key, value, op, ck.id, seq}
-	reply := PutAppendReply{}
-	ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply)
-	for reply.Err != OK {
+	for {
 		//DPrintf("reply:%v", reply)
+		reply := PutAppendReply{}
+		done := make(chan bool)
+		leader := ck.leader
+		go ck.sendWithTimeout(func() {
+			ck.servers[leader].Call("KVServer.PutAppend", &args, &reply)
+		}, done)
+		select {
+		case <-time.After(1 * time.Second):
+		case <-done:
+			if reply.Err == OK {
+				DPrintf("leader:%d,k:%s,v:%s,op:%s,seq:%d", leader, key, value, op, seq)
+				return
+			}
+		}
 		ck.changeLeader()
-		reply = PutAppendReply{}
-		ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply)
 	}
-	DPrintf("leader:%d,k:%s,v:%s,op:%s,seq:%d", ck.leader, key, value, op, seq)
 }
 
 func (ck *Clerk) Put(key string, value string) {
@@ -95,4 +113,8 @@ func (ck *Clerk) changeLeader() {
 	leader := (ck.leader + 1) % ck.serverCount
 	//DPrintf("clientId:%d,leader:%d", ck.id, leader)
 	ck.leader = leader
+}
+func (ck *Clerk) sendWithTimeout(fn func(), requestDone chan bool) {
+	fn()
+	requestDone <- true
 }
