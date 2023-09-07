@@ -208,6 +208,9 @@ func (rf *Raft) getIndex(index int) int {
 }
 func (rf *Raft) getTerm(index int) int {
 	if rf.getIndex(index) >= 0 {
+		if rf.getIndex(index) >= len(rf.logs) {
+			panic(fmt.Sprintf("index:%d,snapIndex:%d,logs:%d,lastlog:%v", index, rf.snapshotIndex, len(rf.logs), rf.logs[len(rf.logs)-1]))
+		}
 		return rf.logs[rf.getIndex(index)].Term
 	} else {
 		panic(fmt.Sprintf("index:%d,snapIndex:%d,logs:%d", index, rf.snapshotIndex, len(rf.logs)))
@@ -460,6 +463,10 @@ func (rf *Raft) sendAppendEntries(index int, args *AppendEntriesArgs) {
 	ok := rf.peers[index].Call("Raft.AppendEntries", args, &reply)
 	if ok {
 		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		if rf.status != Leader {
+			return
+		}
 		if reply.Success {
 			if args.PrevLogIndex+len(args.Entries) > rf.matchIndex[index] {
 				rf.matchIndex[index] = args.PrevLogIndex + len(args.Entries)
@@ -506,7 +513,6 @@ func (rf *Raft) sendAppendEntries(index int, args *AppendEntriesArgs) {
 				}
 			}
 		}
-		rf.mu.Unlock()
 	}
 }
 
@@ -694,9 +700,9 @@ func (rf *Raft) election() {
 		rf.votedFor = rf.me
 		rf.persist()
 		rf.timeout = rf.random.Int63n(500) + 1000
-		rf.mu.Unlock()
 		//log.Printf("Candidate:%d,term:%d", rf.me, rf.term)
 		startTime := time.Now().Add(time.Duration(rf.timeout) * time.Millisecond)
+		rf.mu.Unlock()
 		var count int32
 		count = 1
 		rf.mu.RLock()
@@ -731,8 +737,9 @@ func (rf *Raft) election() {
 				index := len(rf.logs) + rf.snapshotIndex
 				for i := 0; i < len(rf.nextIndex); i++ {
 					rf.nextIndex[i] = index
+					rf.matchIndex[i] = 0
 				}
-				DPrintf("leader:%d,term:%d,count:%d", rf.me, rf.term, count)
+				DPrintf("leader:%d,term:%d,count:%d", rf.me, rf.term, atomic.LoadInt32(&count))
 				go rf.heartBeats()
 			}
 			rf.mu.Unlock()
