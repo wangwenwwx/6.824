@@ -158,6 +158,11 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	sc.mu.Lock()
 	if sc.appliedSeq[args.ClientId] >= args.Seq {
 		reply.Err = OK
+		if args.Num == -1 || args.Num >= len(sc.configs) {
+			reply.Config = sc.configs[len(sc.configs)-1]
+		} else {
+			reply.Config = sc.configs[args.Num]
+		}
 		sc.mu.Unlock()
 		return
 	}
@@ -188,7 +193,7 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 		reply.Err = ServerError
 	} else {
 		reply.Err = OK
-		if args.Num == -1 {
+		if args.Num == -1 || args.Num >= len(sc.configs) {
 			reply.Config = sc.configs[len(sc.configs)-1]
 		} else {
 			reply.Config = sc.configs[args.Num]
@@ -327,7 +332,7 @@ func reBalance(config *Config) {
 		return
 	}
 	mod := NShards % len(config.Groups)
-	max := NShards / len(config.Groups)
+	min := NShards / len(config.Groups)
 	count := make(map[int]int)
 	for i := 0; i < 10; i++ {
 		_, ok := config.Groups[config.Shards[i]]
@@ -339,25 +344,26 @@ func reBalance(config *Config) {
 	}
 	targets := make([]int, 0)
 	for k, _ := range config.Groups {
-		if count[k] < max {
+		if count[k] < min {
 			targets = append(targets, k)
 		}
 	}
 	sort.Ints(targets)
-	for index := 0; index < 10 && len(targets) > 0; index++ {
-		gid := config.Shards[index]
-		if gid != 0 && count[gid] <= max {
+	for i, j := 0, 0; i < 10 && len(targets) > 0; i++ {
+		gid := config.Shards[i]
+		if gid != 0 && count[gid] <= min {
 			continue
 		}
-		if gid != 0 && count[gid] == max+1 && mod > 0 {
+		if gid != 0 && count[gid] == min+1 && mod > 0 {
 			mod--
 			continue
 		}
-		config.Shards[index] = targets[0]
-		count[targets[0]]++
+		config.Shards[i] = targets[j]
+		count[targets[j]]++
 		count[gid]--
-		if count[targets[0]] >= max {
-			targets = targets[1:]
+		if count[targets[j]] >= min {
+			j++
+			j = j % len(targets)
 		}
 	}
 }
