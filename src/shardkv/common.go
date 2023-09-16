@@ -27,6 +27,9 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	ClientId int64
+	Seq      int32
+	Shard    int
 }
 
 type PutAppendReply struct {
@@ -36,9 +39,21 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
+	ClientId int64
+	Seq      int32
+	Shard    int
 }
 
 type GetReply struct {
 	Err   Err
 	Value string
+}
+type TranShardArgs struct {
+	Shard      int
+	Data       map[string]string
+	AppliedSeq map[int64]int32
+	ConfigNum  int
+}
+type TransShardReply struct {
+	Err Err
 }
