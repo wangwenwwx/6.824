@@ -3,12 +3,23 @@ package shardctrler
 import (
 	"6.5840/raft"
 	"fmt"
+	"log"
 	"sort"
+	"sync/atomic"
 	"time"
 )
 import "6.5840/labrpc"
 import "sync"
 import "6.5840/labgob"
+
+const Debug = false
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug {
+		log.Printf(format, a...)
+	}
+	return
+}
 
 type ShardCtrler struct {
 	mu      sync.Mutex
@@ -23,6 +34,7 @@ type ShardCtrler struct {
 	appliedSeq        map[int64]int32
 
 	configs []Config // indexed by config num
+	dead    int32
 }
 
 type Op struct {
@@ -39,9 +51,9 @@ type Op struct {
 func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
 	sc.mu.Lock()
+	defer sc.mu.Unlock()
 	if sc.appliedSeq[args.ClientId] >= args.Seq {
 		reply.Err = OK
-		sc.mu.Unlock()
 		return
 	}
 	op := Op{
@@ -51,13 +63,12 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 		JoinArgs: *args,
 	}
 	index, _, isLeader := sc.rf.Start(op)
-	//DPrintf("raftIndex:%d,args:%+v", index, op)
-	//defer DPrintf("put reply:%v", reply)
+	//defer DPrintf("put reply:%v\n", reply)
 	if !isLeader {
 		reply.WrongLeader = true
-		sc.mu.Unlock()
 		return
 	}
+	DPrintf("raftIndex:%d,op:%+v\n", index, op)
 	outTime := time.Now().Add(1 * time.Second)
 	sc.runningCommandMap[index] = true
 	for time.Now().Before(outTime) && sc.lastAppliedIndex < index {
@@ -68,19 +79,18 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	}
 	delete(sc.runningCommandMap, index)
 	if op.ClientId != sc.lastAppliedOp.ClientId || op.Seq != sc.lastAppliedOp.Seq {
-		reply.Err = ServerError
+		reply.WrongLeader = true
 	} else {
 		reply.Err = OK
 	}
-	sc.mu.Unlock()
 }
 
 func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
 	sc.mu.Lock()
+	defer sc.mu.Unlock()
 	if sc.appliedSeq[args.ClientId] >= args.Seq {
 		reply.Err = OK
-		sc.mu.Unlock()
 		return
 	}
 	op := Op{
@@ -90,13 +100,12 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 		LeaveArgs: *args,
 	}
 	index, _, isLeader := sc.rf.Start(op)
-	//DPrintf("raftIndex:%d,args:%+v", index, op)
 	//defer DPrintf("put reply:%v", reply)
 	if !isLeader {
 		reply.WrongLeader = true
-		sc.mu.Unlock()
 		return
 	}
+	DPrintf("raftIndex:%d,args:%+v\n", index, op)
 	outTime := time.Now().Add(1 * time.Second)
 	sc.runningCommandMap[index] = true
 	for time.Now().Before(outTime) && sc.lastAppliedIndex < index {
@@ -107,19 +116,18 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 	}
 	delete(sc.runningCommandMap, index)
 	if op.ClientId != sc.lastAppliedOp.ClientId || op.Seq != sc.lastAppliedOp.Seq {
-		reply.Err = ServerError
+		reply.WrongLeader = true
 	} else {
 		reply.Err = OK
 	}
-	sc.mu.Unlock()
 }
 
 func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
 	sc.mu.Lock()
+	defer sc.mu.Unlock()
 	if sc.appliedSeq[args.ClientId] >= args.Seq {
 		reply.Err = OK
-		sc.mu.Unlock()
 		return
 	}
 	op := Op{
@@ -129,13 +137,12 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 		MoveArgs: *args,
 	}
 	index, _, isLeader := sc.rf.Start(op)
-	//DPrintf("raftIndex:%d,args:%+v", index, op)
 	//defer DPrintf("put reply:%v", reply)
 	if !isLeader {
 		reply.WrongLeader = true
-		sc.mu.Unlock()
 		return
 	}
+	DPrintf("raftIndex:%d,args:%+v\n", index, op)
 	outTime := time.Now().Add(1 * time.Second)
 	sc.runningCommandMap[index] = true
 	for time.Now().Before(outTime) && sc.lastAppliedIndex < index {
@@ -146,16 +153,16 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 	}
 	delete(sc.runningCommandMap, index)
 	if op.ClientId != sc.lastAppliedOp.ClientId || op.Seq != sc.lastAppliedOp.Seq {
-		reply.Err = ServerError
+		reply.WrongLeader = true
 	} else {
 		reply.Err = OK
 	}
-	sc.mu.Unlock()
 }
 
 func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
 	sc.mu.Lock()
+	defer sc.mu.Unlock()
 	if sc.appliedSeq[args.ClientId] >= args.Seq {
 		reply.Err = OK
 		if args.Num == -1 || args.Num >= len(sc.configs) {
@@ -163,7 +170,6 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 		} else {
 			reply.Config = sc.configs[args.Num]
 		}
-		sc.mu.Unlock()
 		return
 	}
 	op := Op{
@@ -173,13 +179,12 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 		QueryArgs: *args,
 	}
 	index, _, isLeader := sc.rf.Start(op)
-	//DPrintf("raftIndex:%d,args:%+v", index, op)
 	//defer DPrintf("put reply:%v", reply)
 	if !isLeader {
 		reply.WrongLeader = true
-		sc.mu.Unlock()
 		return
 	}
+	DPrintf("raftIndex:%d,args:%+v\n", index, op)
 	outTime := time.Now().Add(1 * time.Second)
 	sc.runningCommandMap[index] = true
 	for time.Now().Before(outTime) && sc.lastAppliedIndex < index {
@@ -190,7 +195,7 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	}
 	delete(sc.runningCommandMap, index)
 	if op.ClientId != sc.lastAppliedOp.ClientId || op.Seq != sc.lastAppliedOp.Seq {
-		reply.Err = ServerError
+		reply.WrongLeader = true
 	} else {
 		reply.Err = OK
 		if args.Num == -1 || args.Num >= len(sc.configs) {
@@ -199,7 +204,6 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 			reply.Config = sc.configs[args.Num]
 		}
 	}
-	sc.mu.Unlock()
 }
 
 // the tester calls Kill() when a ShardCtrler instance won't
@@ -209,6 +213,12 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 func (sc *ShardCtrler) Kill() {
 	sc.rf.Kill()
 	// Your code here, if desired.
+	atomic.StoreInt32(&sc.dead, 1)
+}
+
+func (sc *ShardCtrler) killed() bool {
+	z := atomic.LoadInt32(&sc.dead)
+	return z == 1
 }
 
 // needed by shardkv tester
@@ -240,7 +250,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 }
 func (sc *ShardCtrler) applier() {
 	for m := range sc.applyCh {
-		//DPrintf("kvMe:%d,command:%+v", sc.me, m)
+		DPrintf("Ctrl: kvMe:%d,command:%+v", sc.me, m)
 		if m.CommandValid {
 			sc.applyCommand(&m)
 		}
@@ -252,7 +262,7 @@ func (sc *ShardCtrler) applyCommand(m *raft.ApplyMsg) {
 	if sc.lastAppliedIndex+1 > m.CommandIndex {
 		return
 	} else if sc.lastAppliedIndex+1 < m.CommandIndex {
-
+		panic(fmt.Sprintf("miss command:%d\n", sc.lastAppliedIndex+1))
 		//DPrintf("index:%d,lastSeq:%d,seq:%d,lastAppliedIndex:%d,commitIndex:%d", sc.me, sc.appliedSeq[op.ClientId], op.Seq, sc.lastAppliedIndex, m.CommandIndex)
 	}
 	sc.mu.Lock()
@@ -277,7 +287,7 @@ func (sc *ShardCtrler) applyCommand(m *raft.ApplyMsg) {
 	}
 	sc.lastAppliedOp = op
 	//DPrintf("me:%d,commitIndex:%d,key:%s,value:%s", sc.me, sc.lastAppliedIndex, op.Key, sc.state[op.Key])
-	for sc.runningCommandMap[sc.lastAppliedIndex] {
+	for !sc.killed() && sc.runningCommandMap[sc.lastAppliedIndex] {
 		sc.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
 		sc.mu.Lock()
