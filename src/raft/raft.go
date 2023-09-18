@@ -600,7 +600,7 @@ func (rf *Raft) ApplySnapshot(args *SnapshotArgs, reply *SnapshotReplay) {
 			SnapshotTerm:  args.SnapshotTerm,
 			SnapshotIndex: args.SnapshotIndex,
 		}
-		rf.commitMsg(apply)
+		go rf.commitMsg(apply)
 	}
 }
 
@@ -649,6 +649,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	close(rf.close)
 }
 
 func (rf *Raft) killed() bool {
@@ -756,28 +757,29 @@ func (rf *Raft) commitMsg(m ApplyMsg) {
 }
 func (rf *Raft) applyMsg() {
 	msgMap := make(map[int]ApplyMsg)
-	for m := range rf.commitChan {
-		if rf.killed() {
+	for {
+		select {
+		case <-rf.close:
 			close(rf.applyChan)
-			close(rf.close)
 			return
-		}
-		if m.CommandValid {
-			msgMap[m.CommandIndex] = m
-			var ok bool
-			msg, ok := msgMap[rf.lastApplied+1]
-			for ok {
-				rf.lastApplied++
-				rf.applyChan <- msg
-				delete(msgMap, rf.lastApplied)
-				msg, ok = msgMap[rf.lastApplied+1]
+		case m := <-rf.commitChan:
+			if m.CommandValid {
+				msgMap[m.CommandIndex] = m
+				var ok bool
+				msg, ok := msgMap[rf.lastApplied+1]
+				for ok {
+					rf.lastApplied++
+					rf.applyChan <- msg
+					delete(msgMap, rf.lastApplied)
+					msg, ok = msgMap[rf.lastApplied+1]
+				}
+			} else if m.SnapshotValid {
+				for i := rf.lastApplied + 1; i <= m.SnapshotIndex; i++ {
+					delete(msgMap, i)
+				}
+				rf.lastApplied = m.SnapshotIndex
+				rf.applyChan <- m
 			}
-		} else if m.SnapshotValid {
-			for i := rf.lastApplied + 1; i <= m.SnapshotIndex; i++ {
-				delete(msgMap, i)
-			}
-			rf.lastApplied = m.SnapshotIndex
-			rf.applyChan <- m
 		}
 	}
 }
