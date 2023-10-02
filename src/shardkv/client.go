@@ -41,8 +41,9 @@ type Clerk struct {
 	config   shardctrler.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
-	id  int64
-	seq [shardctrler.NShards]int32
+	id        int64
+	seq       [shardctrler.NShards]int32
+	leaderMap map[int]int
 }
 
 // the tester calls MakeClerk.
@@ -58,6 +59,7 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.make_end = make_end
 	// You'll have to add code here.
 	ck.id = nrand()
+	ck.leaderMap = make(map[int]int)
 	return ck
 }
 
@@ -76,13 +78,16 @@ func (ck *Clerk) Get(key string) string {
 
 	for {
 		gid := ck.config.Shards[shard]
+		preLeaderIndex := ck.leaderMap[gid]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
-				srv := ck.make_end(servers[si])
+				index := (preLeaderIndex + si) % len(servers)
+				srv := ck.make_end(servers[index])
 				var reply GetReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+					ck.leaderMap[gid] = index
 					return reply.Value
 				}
 				if ok && (reply.Err == ErrWrongGroup) {
@@ -114,12 +119,15 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	for {
 		gid := ck.config.Shards[shard]
+		preLeaderIndex := ck.leaderMap[gid]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
-				srv := ck.make_end(servers[si])
+				index := (preLeaderIndex + si) % len(servers)
+				srv := ck.make_end(servers[index])
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
 				if ok && reply.Err == OK {
+					ck.leaderMap[gid] = index
 					return
 				}
 				if ok && reply.Err == ErrWrongGroup {

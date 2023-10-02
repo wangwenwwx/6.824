@@ -67,6 +67,9 @@ type ShardKV struct {
 
 	dead  int32
 	peers []string
+
+	msgApplied *sync.Cond
+	commandEnd *sync.Cond
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
@@ -103,12 +106,11 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	outTime := time.Now().Add(1 * time.Second)
 	kv.waitCommandMap[index]++
 	for time.Now().Before(outTime) && kv.lastAppliedIndex < index {
-		kv.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
-		kv.mu.Lock()
+		kv.msgApplied.Wait()
 		//DPrintf("get:client:%d,me:%d,raftIndex:%d,lastIndex:%d,shard:%d\n", args.ClientId, kv.me, index, kv.lastAppliedIndex, args.Shard)
 	}
 	kv.waitCommandMap[index]--
+	kv.commandEnd.Signal()
 	if kv.waitCommandMap[index] == 0 {
 		delete(kv.waitCommandMap, index)
 	}
@@ -156,12 +158,11 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	outTime := time.Now().Add(1 * time.Second)
 	kv.waitCommandMap[index]++
 	for time.Now().Before(outTime) && kv.lastAppliedIndex < index {
-		kv.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
-		kv.mu.Lock()
+		kv.msgApplied.Wait()
 		//DPrintf("putAppend:client:%d,me:%d,raftIndex:%d,lastIndex:%d,shard:%d\n", args.ClientId, kv.me, index, kv.lastAppliedIndex, args.Shard)
 	}
 	kv.waitCommandMap[index]--
+	kv.commandEnd.Signal()
 	if kv.waitCommandMap[index] == 0 {
 		delete(kv.waitCommandMap, index)
 	}
@@ -201,12 +202,11 @@ func (kv *ShardKV) AcceptShard(args *TranShardArgs, reply *TransShardReply) {
 	outTime := time.Now().Add(1 * time.Second)
 	kv.waitCommandMap[index]++
 	for time.Now().Before(outTime) && kv.lastAppliedIndex < index {
-		kv.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
-		kv.mu.Lock()
+		kv.msgApplied.Wait()
 		//DPrintf("accept shard:%d,config:%d,me:%d-%d,raftIndex:%d,lastIndex:%d\n", args.Shard, args.ConfigNum, kv.me, kv.gid, index, kv.lastAppliedIndex)
 	}
 	kv.waitCommandMap[index]--
+	kv.commandEnd.Signal()
 	if kv.waitCommandMap[index] == 0 {
 		delete(kv.waitCommandMap, index)
 	}
@@ -238,12 +238,11 @@ func (kv *ShardKV) RemoveShard(args *RemoveShardArgs, reply *RemoveShardReply) {
 	outTime := time.Now().Add(1 * time.Second)
 	kv.waitCommandMap[index]++
 	for time.Now().Before(outTime) && kv.lastAppliedIndex < index {
-		kv.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
-		kv.mu.Lock()
+		kv.msgApplied.Wait()
 		//DPrintf("remove shard:%d,config:%d,me:%d-%d,raftIndex:%d,lastIndex:%d\n", args.Shard, args.ShardConfigNum, kv.me, kv.gid, index, kv.lastAppliedIndex)
 	}
 	kv.waitCommandMap[index]--
+	kv.commandEnd.Signal()
 	if kv.waitCommandMap[index] == 0 {
 		delete(kv.waitCommandMap, index)
 	}
@@ -283,12 +282,11 @@ func (kv *ShardKV) updateConfig(conf shardctrler.Config) bool {
 		outTime := time.Now().Add(1 * time.Second)
 		kv.waitCommandMap[index]++
 		for time.Now().Before(outTime) && kv.lastAppliedIndex < index {
-			kv.mu.Unlock()
-			time.Sleep(10 * time.Millisecond)
-			kv.mu.Lock()
+			kv.msgApplied.Wait()
 			//DPrintf("update config:%d,me:%d-%d,raftIndex:%d,lastIndex:%d\n", conf.Num, kv.me, kv.gid, index, kv.lastAppliedIndex)
 		}
 		kv.waitCommandMap[index]--
+		kv.commandEnd.Signal()
 		if kv.waitCommandMap[index] == 0 {
 			delete(kv.waitCommandMap, index)
 		}
@@ -355,7 +353,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.ctrlers = ctrlers
 
 	// Your initialization code here.
-
+	kv.msgApplied = sync.NewCond(&kv.mu)
+	kv.commandEnd = sync.NewCond(&kv.mu)
 	// Use something like this to talk to the shardctrler:
 	// kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 	kv.persister = persister
@@ -418,9 +417,8 @@ func (kv *ShardKV) applyCommand(m *raft.ApplyMsg) {
 		kv.snapshot()
 	}
 	for kv.waitCommandMap[kv.lastAppliedIndex] != 0 {
-		kv.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
-		kv.mu.Lock()
+		kv.msgApplied.Signal()
+		kv.commandEnd.Wait()
 	}
 }
 func (kv *ShardKV) applyClientOp(op *Op) {
@@ -615,6 +613,7 @@ func (kv *ShardKV) refreshConfig(configNum int) {
 			ok := srv.Call("ShardCtrler.Query", args, &reply)
 			if ok && reply.WrongLeader == false && reply.Config.Num == args.Num {
 				for !kv.updateConfig(reply.Config) {
+					time.Sleep(100 * time.Millisecond)
 				}
 				args.Num++
 				args.Seq++

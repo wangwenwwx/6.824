@@ -15,8 +15,10 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
-	ClientId int64
-	Seq      int32
+	ClientId    int64
+	Seq         int32
+	LeaderId    int32
+	ServerCount int
 }
 
 func nrand() int64 {
@@ -32,6 +34,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	// Your code here.
 	ck.ClientId = nrand()
 	ck.Seq = 0
+	ck.LeaderId = 0
+	ck.ServerCount = len(servers)
 	return ck
 }
 
@@ -40,12 +44,15 @@ func (ck *Clerk) Query(num int) Config {
 	args := &QueryArgs{Num: num, ClientId: ck.ClientId, Seq: seq}
 	// Your code here.
 	args.Num = num
+	preLeader := ck.LeaderId
 	for {
 		// try each known server.
-		for _, srv := range ck.servers {
+		for i := 0; i < ck.ServerCount; i++ {
 			var reply QueryReply
-			ok := srv.Call("ShardCtrler.Query", args, &reply)
+			index := (int(preLeader) + i) % ck.ServerCount
+			ok := ck.servers[index].Call("ShardCtrler.Query", args, &reply)
 			if ok && reply.WrongLeader == false {
+				ck.changLeader(int32(index), preLeader)
 				return reply.Config
 			}
 		}
@@ -61,12 +68,15 @@ func (ck *Clerk) Join(servers map[int][]string) {
 	args.Seq = seq
 	args.ClientId = ck.ClientId
 
+	preLeader := ck.LeaderId
 	for {
 		// try each known server.
-		for _, srv := range ck.servers {
+		for i := 0; i < ck.ServerCount; i++ {
 			var reply JoinReply
-			ok := srv.Call("ShardCtrler.Join", args, &reply)
+			index := (int(preLeader) + i) % ck.ServerCount
+			ok := ck.servers[index].Call("ShardCtrler.Join", args, &reply)
 			if ok && reply.WrongLeader == false {
+				ck.changLeader(int32(index), preLeader)
 				return
 			}
 		}
@@ -82,12 +92,15 @@ func (ck *Clerk) Leave(gids []int) {
 	args.ClientId = ck.ClientId
 	args.Seq = seq
 
+	preLeader := ck.LeaderId
 	for {
 		// try each known server.
-		for _, srv := range ck.servers {
+		for i := 0; i < ck.ServerCount; i++ {
 			var reply LeaveReply
-			ok := srv.Call("ShardCtrler.Leave", args, &reply)
+			index := (int(preLeader) + i) % ck.ServerCount
+			ok := ck.servers[index].Call("ShardCtrler.Leave", args, &reply)
 			if ok && reply.WrongLeader == false {
+				ck.changLeader(int32(index), preLeader)
 				return
 			}
 		}
@@ -105,15 +118,23 @@ func (ck *Clerk) Move(shard int, gid int) {
 	args.ClientId = ck.ClientId
 	args.Seq = seq
 
+	preLeader := ck.LeaderId
 	for {
 		// try each known server.
-		for _, srv := range ck.servers {
+		for i := 0; i < ck.ServerCount; i++ {
 			var reply MoveReply
-			ok := srv.Call("ShardCtrler.Move", args, &reply)
+			index := (int(preLeader) + i) % ck.ServerCount
+			ok := ck.servers[index].Call("ShardCtrler.Move", args, &reply)
 			if ok && reply.WrongLeader == false {
+				ck.changLeader(int32(index), preLeader)
 				return
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+func (ck *Clerk) changLeader(leaderId, preLeaderId int32) {
+	if leaderId != preLeaderId {
+		atomic.CompareAndSwapInt32(&ck.LeaderId, preLeaderId, leaderId)
 	}
 }
