@@ -27,6 +27,7 @@ type Op struct {
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 	Op string
+	Id string
 
 	ClientId int64
 	Seq      int32
@@ -58,8 +59,7 @@ type ShardKV struct {
 	waitShards       map[int]bool
 	waitSendShards   map[int]bool
 	lastAppliedIndex int
-	lastAppliedOp    Op
-	waitCommandMap   map[int]int
+	waitCommandMap   map[string]bool
 	state            [shardctrler.NShards]map[string]string
 	appliedSeq       [shardctrler.NShards]map[int64]int32
 
@@ -69,7 +69,7 @@ type ShardKV struct {
 	peers []string
 
 	msgApplied *sync.Cond
-	commandEnd *sync.Cond
+	opMap      map[string]Op
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
@@ -91,6 +91,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	}
 	op := Op{
 		Op:       "Get",
+		Id:       randstring(32),
 		ClientId: args.ClientId,
 		Seq:      args.Seq,
 		Key:      args.Key,
@@ -104,23 +105,21 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 	outTime := time.Now().Add(1 * time.Second)
-	kv.waitCommandMap[index]++
+	kv.waitCommandMap[op.Id] = true
 	for time.Now().Before(outTime) && kv.lastAppliedIndex < index {
 		kv.msgApplied.Wait()
 		//DPrintf("get:client:%d,me:%d,raftIndex:%d,lastIndex:%d,shard:%d\n", args.ClientId, kv.me, index, kv.lastAppliedIndex, args.Shard)
 	}
-	kv.waitCommandMap[index]--
-	kv.commandEnd.Signal()
-	if kv.waitCommandMap[index] == 0 {
-		delete(kv.waitCommandMap, index)
-	}
-	if op.ClientId != kv.lastAppliedOp.ClientId || op.Seq != kv.lastAppliedOp.Seq {
+	cmd, ok := kv.opMap[op.Id]
+	delete(kv.waitCommandMap, op.Id)
+	delete(kv.opMap, op.Id)
+	if !ok {
 		reply.Err = ErrWrongLeader
-	} else if !op.Applied {
+	} else if !cmd.Applied {
 		reply.Err = ErrWrongGroup
 	} else {
 		reply.Err = OK
-		reply.Value = kv.state[args.Shard][args.Key]
+		reply.Value = cmd.Value
 	}
 }
 
@@ -142,6 +141,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	op := Op{
 		Op:       args.Op,
+		Id:       randstring(32),
 		ClientId: args.ClientId,
 		Seq:      args.Seq,
 		Key:      args.Key,
@@ -156,19 +156,17 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	outTime := time.Now().Add(1 * time.Second)
-	kv.waitCommandMap[index]++
+	kv.waitCommandMap[op.Id] = true
 	for time.Now().Before(outTime) && kv.lastAppliedIndex < index {
 		kv.msgApplied.Wait()
 		//DPrintf("putAppend:client:%d,me:%d,raftIndex:%d,lastIndex:%d,shard:%d\n", args.ClientId, kv.me, index, kv.lastAppliedIndex, args.Shard)
 	}
-	kv.waitCommandMap[index]--
-	kv.commandEnd.Signal()
-	if kv.waitCommandMap[index] == 0 {
-		delete(kv.waitCommandMap, index)
-	}
-	if op.ClientId != kv.lastAppliedOp.ClientId || op.Seq != kv.lastAppliedOp.Seq {
+	delete(kv.waitCommandMap, op.Id)
+	cmd, ok := kv.opMap[op.Id]
+	delete(kv.opMap, op.Id)
+	if !ok {
 		reply.Err = ErrWrongLeader
-	} else if !op.Applied {
+	} else if !cmd.Applied {
 		reply.Err = ErrWrongGroup
 	} else {
 		reply.Err = OK
@@ -200,15 +198,9 @@ func (kv *ShardKV) AcceptShard(args *TranShardArgs, reply *TransShardReply) {
 		return
 	}
 	outTime := time.Now().Add(1 * time.Second)
-	kv.waitCommandMap[index]++
 	for time.Now().Before(outTime) && kv.lastAppliedIndex < index {
 		kv.msgApplied.Wait()
 		//DPrintf("accept shard:%d,config:%d,me:%d-%d,raftIndex:%d,lastIndex:%d\n", args.Shard, args.ConfigNum, kv.me, kv.gid, index, kv.lastAppliedIndex)
-	}
-	kv.waitCommandMap[index]--
-	kv.commandEnd.Signal()
-	if kv.waitCommandMap[index] == 0 {
-		delete(kv.waitCommandMap, index)
 	}
 	if kv.config.Num > args.ConfigNum || !kv.waitShards[args.Shard] {
 		reply.Err = OK
@@ -236,15 +228,9 @@ func (kv *ShardKV) RemoveShard(args *RemoveShardArgs, reply *RemoveShardReply) {
 		return
 	}
 	outTime := time.Now().Add(1 * time.Second)
-	kv.waitCommandMap[index]++
 	for time.Now().Before(outTime) && kv.lastAppliedIndex < index {
 		kv.msgApplied.Wait()
 		//DPrintf("remove shard:%d,config:%d,me:%d-%d,raftIndex:%d,lastIndex:%d\n", args.Shard, args.ShardConfigNum, kv.me, kv.gid, index, kv.lastAppliedIndex)
-	}
-	kv.waitCommandMap[index]--
-	kv.commandEnd.Signal()
-	if kv.waitCommandMap[index] == 0 {
-		delete(kv.waitCommandMap, index)
 	}
 	if kv.config.Num == args.ShardConfigNum && !kv.waitSendShards[args.Shard] || kv.config.Num > args.ShardConfigNum {
 		reply.Err = OK
@@ -280,15 +266,9 @@ func (kv *ShardKV) updateConfig(conf shardctrler.Config) bool {
 		}
 		DPrintf("raftIndex:%d,args:%+v", index, op)
 		outTime := time.Now().Add(1 * time.Second)
-		kv.waitCommandMap[index]++
 		for time.Now().Before(outTime) && kv.lastAppliedIndex < index {
 			kv.msgApplied.Wait()
 			//DPrintf("update config:%d,me:%d-%d,raftIndex:%d,lastIndex:%d\n", conf.Num, kv.me, kv.gid, index, kv.lastAppliedIndex)
-		}
-		kv.waitCommandMap[index]--
-		kv.commandEnd.Signal()
-		if kv.waitCommandMap[index] == 0 {
-			delete(kv.waitCommandMap, index)
 		}
 		if kv.config.Num == conf.Num {
 			return true
@@ -354,10 +334,11 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	// Your initialization code here.
 	kv.msgApplied = sync.NewCond(&kv.mu)
-	kv.commandEnd = sync.NewCond(&kv.mu)
 	// Use something like this to talk to the shardctrler:
 	// kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 	kv.persister = persister
+	kv.opMap = make(map[string]Op)
+	kv.waitCommandMap = make(map[string]bool)
 	if persister.SnapshotSize() > 0 {
 		kv.applySnapshot(persister.ReadSnapshot(), -1)
 	} else {
@@ -365,7 +346,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		kv.waitShards = make(map[int]bool)
 		kv.waitSendShards = make(map[int]bool)
 		kv.lastAppliedIndex = 0
-		kv.waitCommandMap = make(map[int]int)
 	}
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
@@ -400,6 +380,9 @@ func (kv *ShardKV) applyCommand(m *raft.ApplyMsg) {
 	op := m.Command.(Op)
 	if op.Op == "Get" || op.Op == "Put" || op.Op == "Append" {
 		kv.applyClientOp(&op)
+		if kv.waitCommandMap[op.Id] {
+			kv.opMap[op.Id] = op
+		}
 	} else if op.Op == "ApplyConfig" {
 		kv.applyConfig(op)
 	} else if op.Op == "ApplyShard" {
@@ -412,14 +395,13 @@ func (kv *ShardKV) applyCommand(m *raft.ApplyMsg) {
 			kv.appliedSeq[op.Shard] = nil
 		}
 	}
-	kv.lastAppliedOp = op
 	if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
 		kv.snapshot()
 	}
-	for kv.waitCommandMap[kv.lastAppliedIndex] != 0 {
-		kv.msgApplied.Signal()
-		kv.commandEnd.Wait()
-	}
+	kv.msgApplied.Broadcast()
+	//for kv.waitCommandMap[kv.lastAppliedIndex] != 0 {
+	//	kv.msgApplied.Signal()
+	//}
 }
 func (kv *ShardKV) applyClientOp(op *Op) {
 	if kv.appliedSeq[op.Shard][op.ClientId]+1 == op.Seq {
@@ -435,9 +417,14 @@ func (kv *ShardKV) applyClientOp(op *Op) {
 			} else {
 				kv.state[op.Shard][op.Key] = value + op.Value
 			}
+		} else {
+			op.Value = kv.state[op.Shard][op.Key]
 		}
 		op.Applied = true
 	} else if kv.appliedSeq[op.Shard][op.ClientId]+1 > op.Seq {
+		if op.Op == "Get" {
+			op.Value = kv.state[op.Shard][op.Key]
+		}
 		op.Applied = true
 	} else {
 		panic(fmt.Sprintf("err Seq,clientId:%d,exp_seq:%d,now_seq:%d", op.ClientId, kv.appliedSeq[op.Shard][op.ClientId]+1, op.Seq))
@@ -503,7 +490,6 @@ func (kv *ShardKV) snapshot() {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(kv.lastAppliedIndex)
-	e.Encode(kv.lastAppliedOp)
 	e.Encode(kv.state)
 	e.Encode(kv.appliedSeq)
 	e.Encode(kv.config)
@@ -519,7 +505,6 @@ func (kv *ShardKV) applySnapshot(snapshot []byte, index int) {
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
 	var lastIncludedIndex int
-	var lastOp Op
 	var state [shardctrler.NShards]map[string]string
 	var appliedSeq [shardctrler.NShards]map[int64]int32
 	var conf shardctrler.Config
@@ -527,7 +512,6 @@ func (kv *ShardKV) applySnapshot(snapshot []byte, index int) {
 	var waitSendShards map[int]bool
 	var peers []string
 	if d.Decode(&lastIncludedIndex) != nil ||
-		d.Decode(&lastOp) != nil ||
 		d.Decode(&state) != nil ||
 		d.Decode(&appliedSeq) != nil ||
 		d.Decode(&conf) != nil ||
@@ -540,10 +524,8 @@ func (kv *ShardKV) applySnapshot(snapshot []byte, index int) {
 		//DPrintf("server %v snapshot doesn't match m.SnapshotIndex", index)
 	}
 	kv.lastAppliedIndex = lastIncludedIndex
-	kv.lastAppliedOp = lastOp
 	kv.state = state
 	kv.appliedSeq = appliedSeq
-	kv.waitCommandMap = make(map[int]int)
 	kv.config = conf
 	kv.waitShards = waitShard
 	kv.waitSendShards = waitSendShards
